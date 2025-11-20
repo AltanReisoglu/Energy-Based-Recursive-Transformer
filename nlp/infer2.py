@@ -3,8 +3,9 @@ import argparse
 from types import SimpleNamespace
 from ebt import EBT_NLP
 from turkish_tokenizer import HFTurkishTokenizer
-
-
+import os
+from dotenv import load_dotenv
+load_dotenv()
 def sample_top_p(probs, p):
     """
     Perform top-p (nucleus) sampling on a probability distribution.
@@ -29,39 +30,99 @@ def sample_top_p(probs, p):
 def default_hparams():
     """Default hyperparameters matching train_ebt.py"""
     hparams = dict(
-        vocab_size=32000,
-        dim=512,
-        n_layers=6,
-        n_heads=8,
-        n_kv_heads=2,
-        hidden_dim=2048,
-        n_experts=8,
-        n_expert_per_token=2,
-        max_seq_len=2048,
-        dropout=0.1,
-        bias=True,
-        norm_eps=1e-5,
-        rope_theta=10000.0,
-        use_cache=True,
-        causal=True,
-        qk_norm=False,
-        flash=False,
-        add_zero_kv=False,
-        talking_heads=False,
-        sparse_topk=None,
-        onnxable=False,
-        linear_attention=False,
-        sliding_window=0,
-        sliding_window_causal=True,
-        max_mem_len=0,
-        emb_frac_gradient=1.0,
+        # optimisation
+        lr=1e-3,
+        batch_size_per_device=2,
+        num_workers_per_gpu=12,
+        max_steps=100000,
+
+        # data
+        dataset_dir="",
+        dataset_name="selimfirat/bilkent-turkish-writings-dataset",
+        context_length=256,
+        pretokenize_dataset=True,
+        
+
+        # model choice
+        model_name="ebt",  # "baseline_transformer" or "ebt"
+
+        # model size
+        embedding_dim=256,
+        num_transformer_blocks=6,
+        multiheaded_attention_heads=6,
+        ffn_dim_multiplier=4,
+        weight_initialization_method="xavier",
+        weight_initialization_gain=1.0,
+        model_max_length=256,
+        # misc
+        execution_mode="inference",
+        debug_unused_parameters=False,
+        mcmc_step_size=500.0,
+        num_workers=4,
+        num_gpus=1
     )
-    return SimpleNamespace(**hparams)
+
+    ebt_params = dict(
+        model_max_length=64,
+        mcmc_step_size=500.0,
+        model_name="ebt",
+        mcmc_step_size_lr_multiplier=1500.0,
+        mcmc_num_steps=3,
+        ebt_type="default",
+        normalize_initial_condition=True,
+        denoising_initial_condition="random_noise",
+        mcmc_step_size_learnable=True,
+        no_mcmc_detach=False,
+        ebt_norm="rms",
+        ebt_act_func="silu",
+        dyt_alpha_init=0.5,
+        mcmc_replay_buffer=False,
+        gaussian_random_noise_scaling=1.0,
+        normalize_initial_condition_only_first_step=False,
+        randomize_mcmc_step_size_scale=1.0,
+        randomize_mcmc_num_steps=0,
+        randomize_mcmc_num_steps_min=0,
+        randomize_mcmc_num_steps_final_landscape=False,
+        langevin_dynamics_noise=0.0,
+        langevin_dynamics_noise_learnable=False,
+        vocab_to_embed_uses_prob_dist=False,
+        num_modality_processing_mlp_layers=1,
+        truncate_mcmc=False,
+        clamp_futures_grad=False,
+        clamp_futures_grad_max_change=9.0,
+        absolute_clamp=0.0,
+        clamp_max_after_warm_up=0.0,
+        sharpen_predicted_distribution=0.0,
+        reconstruction_coeff=1.0,
+        contrastive_loss=False,
+        contrastive_loss_coeff=0.0005,
+        soften_target_prob_dist=0.0,
+        adaptive=False,
+        infer_ebt_override_alpha=0.,
+        infer_generated_samples=1,
+        infer_steps_final_landscape=False,
+        infer_energy_sampling_technique="min",
+        infer_alpha_final_landscape=False,
+        infer_langevin_first_step=True,
+        infer_accept_lower_energies=True,
+        infer_ebt_num_steps=1,
+        gradient_accumulation_steps=4,
+        use_amp=False,
+        use_activation_checkpointing=True,
+        use_torch_compile=True,
+        use_bnb_optimizer=False,
+        infer_langevin_dynamics_noise=0
+    )
+    hparams.update(ebt_params)
+
+    hparams = SimpleNamespace(**hparams)
+    return hparams
+    
 
 
 def load_checkpoint_to_model(model, ckpt_path, device):
     """Load checkpoint into model, handling both state_dict and full ckpt formats"""
-    print(f"Loading checkpoint from {ckpt_path}...")
+   
     ckpt = torch.load(ckpt_path, map_location=device)
     
     if isinstance(ckpt, dict) and 'state_dict' in ckpt:
@@ -152,11 +213,13 @@ def generate(
     # Initialize carry and cache
     model.eval()
     with torch.no_grad():
-        carry = model.initial_carry(batch_size, prompt_len)
+        carry = model.initial_carry(batch_size,2 * prompt_len )
         carry = _move_obj_to_device(carry, device)
         past_cache = None
         
         # Process prompt
+        """print(carry.inner_carry.z_H.shape,"1111111")
+        print(input_ids.shape,"11111111111111")"""
         logits, energies, pred_dists, past_cache, carry = model.ebt_advanced_inference(
             input_ids, carry=carry, past_cache=past_cache
         )
@@ -165,9 +228,9 @@ def generate(
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
         
         # Generate tokens one by one
-        for step in range(max_new_tokens):
+        for step in range(5):
             # Get last logits (batch_size, vocab_size)
-            next_logits = logits[:, -1, :]  # (batch_size, vocab_size)
+            next_logits = logits[:, -1,:]  # (batch_size, vocab_size)
             
             # Apply temperature
             if temperature > 0:
@@ -203,26 +266,25 @@ def generate(
             
             # Forward pass for next step (only for unfinished examples)
             logits, energies, pred_dists, past_cache, carry = model.ebt_advanced_inference(
-                next_token, carry=carry, past_cache=past_cache
+                generated[:,-prompt_len:], carry=carry, past_cache=None
             )
+
+            
     
     return generated
 
 
 def main():
-    parser = argparse.ArgumentParser(description='EBT_NLP Inference')
-    parser.add_argument('--ckpt', type=str, required=True, help='Path to checkpoint')
-    parser.add_argument('--prompt', type=str, default=None, help='Input prompt')
-    parser.add_argument('--input_file', type=str, default=None, help='File with prompts (one per line)')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
-    parser.add_argument('--max_len', type=int, default=64, help='Max input length')
-    parser.add_argument('--max_new_tokens', type=int, default=128, help='Max tokens to generate')
-    parser.add_argument('--temperature', type=float, default=0.7, help='Sampling temperature')
-    parser.add_argument('--top_p', type=float, default=0.9, help='Top-p sampling threshold')
-    parser.add_argument('--device', type=str, default=None, help='Device (cuda/cpu)')
-    parser.add_argument('--out_file', type=str, default=None, help='Output file for results')
-    
-    args = parser.parse_args()
+    args=SimpleNamespace(
+        device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu'),
+        prompt="Belli etmemeye çalışsak da hepimiz ölümden",
+        ckpt =os.getenv(key="ckpt"),
+        batch_size=1,
+        max_len=128,
+        temperature=0.7,
+        top_p=0.95,
+        max_new_tokens=128
+    )
     
     # Determine device
     if args.device is None:
@@ -234,28 +296,35 @@ def main():
     
     # Load model and tokenizer
     hparams = default_hparams()
-    model = EBT_NLP(hparams).to(device)
+    config_dict = dict(H_cycles=1, L_cycles=1, H_layers=1, L_layers=1)
+    model = EBT_NLP(hparams,config_dict).to(device)
     load_checkpoint_to_model(model, args.ckpt, device)
     
-    tokenizer = HFTurkishTokenizer()
+    tokenizer = HFTurkishTokenizer(
+            bos_token="<s>",
+            eos_token="</s>",
+            sep_token="<sep>",
+            cls_token="<cls>",
+            mask_token="<mask>",
+            pad_token="<pad>",
+            unk_token="<unk>",
+            model_max_length=128
+        )
     
     # Prepare prompts
     if args.prompt:
         prompts = [args.prompt]
-    elif args.input_file:
-        with open(args.input_file, 'r', encoding='utf-8') as f:
-            prompts = [line.strip() for line in f if line.strip()]
-    else:
-        raise ValueError("Must provide --prompt or --input_file")
+    
     
     # Process in batches
     results = []
-    for batch_idx in range(0, len(prompts), args.batch_size):
-        batch_prompts = prompts[batch_idx:batch_idx + args.batch_size]
+    for batch_idx in range(0, len(prompts)):
         
-        print(f"\n[Batch {batch_idx // args.batch_size + 1}]")
-        input_ids = prepare_inputs(batch_prompts, tokenizer, args.max_len, device)
         
+
+        input_ids = prepare_inputs(prompts, tokenizer, args.max_len, device).unsqueeze(0)
+        input_ids=torch.cat((input_ids,input_ids),dim=0)
+        print(input_ids.shape)
         # Generate
         generated_ids = generate(
             model, input_ids, tokenizer,
@@ -268,17 +337,17 @@ def main():
         
         # Decode and print
         texts = decode_tokens(tokenizer, generated_ids)
-        for prompt, text in zip(batch_prompts, texts):
+        for prompt, text in zip(prompts, texts):
             print(f"Prompt: {prompt}")
             print(f"Generated: {text}\n")
             results.append({'prompt': prompt, 'generated': text})
     
-    # Save results if requested
-    if args.out_file:
+
+        """    if args.out_file:
         import json
         with open(args.out_file, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"Results saved to {args.out_file}")
+        print(f"Results saved to {args.out_file}")"""
 
 
 if __name__ == '__main__':

@@ -458,6 +458,7 @@ class EBT_NLP(L.LightningModule):
                     reconstruction_loss = reconstruction_loss / total_mcmc_steps # normalize so is indifferent to number of mcmc steps
               
             #pure logging things (no function for training)
+            
             if mcmc_step == 0:
                 initial_loss = cce_loss.detach()
                 initial_pred_energies = predicted_energy.squeeze().mean().detach()

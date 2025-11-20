@@ -687,10 +687,18 @@ class AdaLNTransformerBlock(nn.Module):
         self.head_dim = args.dim // args.n_heads
         self.attention = Attention(args)
         ""
-        self.feed_forward = (
+        """self.feed_forward = (
             DeepseekV2MoE(config)
             if config.n_routed_experts is not None
             else SwigluFFN(
+                in_features=args.dim,
+                hidden_features=args.ffn_dim_multiplier * args.dim if args.ffn_dim_multiplier is not None else 4 * args.dim,
+                out_features=args.dim,
+            )
+        )"""
+        self.feed_forward = (
+            
+            SwigluFFN(
                 in_features=args.dim,
                 hidden_features=args.ffn_dim_multiplier * args.dim if args.ffn_dim_multiplier is not None else 4 * args.dim,
                 out_features=args.dim,
@@ -763,7 +771,7 @@ class AdaLNTransformerBlock(nn.Module):
         
         h = x + gate_msa.unsqueeze(1) * self.advanced_dropout(attn)
         x = self.residual_fn(h, x)
-
+        #print(h.shape,x.shape,"dasadsasdsdsdsdsdsdsdsdsdsdsd")
         out = h + gate_mlp.unsqueeze(1) * self.feed_forward(modulate(self.ffn_norm(h), shift_mlp, scale_mlp))
         out = self.residual_fn(out, x)
         
